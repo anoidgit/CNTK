@@ -1,1 +1,3 @@
-This content has moved, see [here](https://github.com/Microsoft/CNTK/wiki/CNTK-2.0-Python-API).
+To use the Python bindings please use [these instructions](https://docs.microsoft.com/en-us/cognitive-toolkit/CNTK-Binary-Download-and-Configuration).
+
+To develop and improve the Python bindings please use the [Windows instructions](https://docs.microsoft.com/en-us/cognitive-toolkit/Setup-CNTK-on-Windows#optional-anaconda-python-installation) or [Linux instructions](https://docs.microsoft.com/en-us/cognitive-toolkit/Setup-CNTK-on-Linux#optional-cntk-v2-python-support) depending on your OS.

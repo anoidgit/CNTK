@@ -27,10 +27,11 @@ CNTKTextFormatReader::CNTKTextFormatReader(const ConfigParameters& config)
 
     try
     {
+        auto corpus = make_shared<CorpusDescriptor>(true);
         if (configHelper.GetElementType() == ElementType::tfloat)
-            m_deserializer = make_shared<TextParser<float>>(configHelper);
+            m_deserializer = make_shared<TextParser<float>>(corpus, configHelper, true);
         else
-            m_deserializer = make_shared<TextParser<double>>(configHelper);
+            m_deserializer = make_shared<TextParser<double>>(corpus, configHelper, true);
 
         if (configHelper.ShouldKeepDataInMemory())
             m_deserializer = make_shared<ChunkCache>(m_deserializer);
@@ -38,9 +39,14 @@ CNTKTextFormatReader::CNTKTextFormatReader(const ConfigParameters& config)
         size_t window = configHelper.GetRandomizationWindow();
         if (window > 0)
         {
-            // Verbosity is a general config parameter, not specific to the text format reader.
-            int verbosity = config(L"verbosity", 0);
-            m_sequenceEnumerator = make_shared<BlockRandomizer>(verbosity, window, m_deserializer, true);
+            // TODO: drop "verbosity", use config.traceLevel() instead. 
+            int verbosity = config(L"verbosity", 0); 
+            m_sequenceEnumerator = make_shared<BlockRandomizer>(verbosity, window, m_deserializer,
+                                                                /*shouldPrefetch =*/ true,
+                                                                /*multithreadedGetNextSequences =*/ false,
+                                                                /*maxNumberOfInvalidSequences =*/ 0,
+                                                                /*sampleBasedRandomizationWindow =*/ configHelper.UseSampleBasedRandomizationWindow(),
+                                                                /*seedOffset =*/ GetRandomSeed(config));
         }
         else
         {

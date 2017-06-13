@@ -19,11 +19,20 @@ namespace Microsoft { namespace MSR { namespace CNTK {
         static void       ForceConstantRandomSeed() {        m_forceConstantRandomSeed = true; }
         static bool ShouldForceConstantRandomSeed() { return m_forceConstantRandomSeed; }
 
+        static void SetGradientAccumulationOptimization(bool enable) { m_optimizeGradientAccumulation = enable; }
+        static bool ShouldOptimizeGradientAccumulation() { return m_optimizeGradientAccumulation; }
+
         // TODO: Currently the flag is set to false. Should be switched to true after more rigorous testing.
         static bool UseV2Aggregator() { return false; }
 
+        static void SetShareNodeValueMatrices(bool enable) { m_enableShareNodeValueMatrices = enable; }
+        static bool ShouldEnableShareNodeValueMatrices() { return m_enableShareNodeValueMatrices; }
+
     private:
         static std::atomic<bool> m_forceDeterministicAlgorithms;
+        // The global flag to enable matrices values in forward and backward prop
+        static std::atomic<bool> m_enableShareNodeValueMatrices;
         static std::atomic<bool> m_forceConstantRandomSeed;
+        static std::atomic<bool> m_optimizeGradientAccumulation;
     };
 }}}

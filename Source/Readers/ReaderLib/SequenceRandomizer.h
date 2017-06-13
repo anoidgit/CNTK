@@ -18,8 +18,8 @@ namespace Microsoft { namespace MSR { namespace CNTK {
 // Randomized sequence description.
 struct RandomizedSequenceDescription
 {
-    // Sequence id.
-    size_t m_id;
+    // Sequence index in original chunk.
+    size_t m_indexInOriginalChunk;
     // Randomized chunk this sequence belongs to.
     const RandomizedChunk* m_chunk;
     // Number of samples in sequence.
@@ -45,8 +45,12 @@ public:
     // If the offset points in the middle of last sequence, the end of the sweep is returned.
     size_t Seek(size_t sweepSampleOffset, size_t sweep);
 
-    // Gets the next randomized sequence descriptions not exceeding the sample count.
-    std::vector<RandomizedSequenceDescription> GetNextSequenceDescriptions(size_t sampleCount, ClosedOpenChunkInterval& requiredChunks);
+    // Repeatedly invokes provided callback passing to it sequence descriptors from the randomized
+    // timeline until the callback returns false. On each successful invocation, it advances the
+    // current position (cursor) in the timeline.
+    void GetNextSequenceDescriptions(
+        const std::function<bool(const RandomizedSequenceDescription&)>& callback,
+        ClosedOpenChunkInterval& requiredChunks);
 
 private:
     DISABLE_COPY_AND_MOVE(SequenceRandomizer);

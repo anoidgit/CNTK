@@ -60,7 +60,7 @@ class imdb_data(fastRCNN.imdb):
         image_index = []
         image_subdirs = []
         for subdir in self._imgSubdirs[self._image_set]:
-            imgFilenames = getFilesInDirectory(self._imgDir + subdir, self._image_ext)
+            imgFilenames = getFilesInDirectory(os.path.join(self._imgDir,subdir), self._image_ext)
             image_index += imgFilenames
             image_subdirs += [subdir] * len(imgFilenames)
         return image_index, image_subdirs
@@ -145,16 +145,19 @@ class imdb_data(fastRCNN.imdb):
         """
         Load image and bounding boxes info from human annotations.
         """
-        #negative images do not have any ground truth annotations
-        if self._image_subdirs[imgIndex].lower() == "negative":
-            return None
-
         imgPath = self.image_path_at(imgIndex)
         bboxesPaths = imgPath[:-4] + ".bboxes.tsv"
         labelsPaths = imgPath[:-4] + ".bboxes.labels.tsv"
-        assert os.path.exists(bboxesPaths), "Error: ground truth bounding boxes file not found: " + bboxesPaths
-        assert os.path.exists(labelsPaths), "Error: ground truth labels file not found: " + bboxesPaths
+        # if no ground truth annotations are available, return None
+        if not os.path.exists(bboxesPaths) or not os.path.exists(labelsPaths):
+            return None
         bboxes = np.loadtxt(bboxesPaths, np.float32)
+
+        # in case there's only one annotation and numpy read the array as single array,
+        # we need to make sure the input is treated as a multi dimensional array instead of a list/ 1D array
+        if len(bboxes.shape) == 1:
+            bboxes = np.array([bboxes])
+
         labels = readFile(labelsPaths)
 
         #remove boxes marked as 'undecided' or 'exclude'
@@ -207,7 +210,9 @@ class imdb_data(fastRCNN.imdb):
         for imgIndex in range(self.num_images):
             imgPath = self.image_path_at(imgIndex)
             imgSubir  = os.path.normpath(imgPath).split(os.path.sep)[-2]
-            if imgSubir != 'negative':
+            bboxesPaths = imgPath[:-4] + ".bboxes.tsv"
+            labelsPaths = imgPath[:-4] + ".bboxes.labels.tsv"
+            if os.path.exists(bboxesPaths) and os.path.exists(labelsPaths):
                 gtBoxes, gtLabels = readGtAnnotation(imgPath)
                 gtBoxes = [box for box, label in zip(gtBoxes, gtLabels) if label.decode('utf-8') == self.classes[classIndex]]
             else:

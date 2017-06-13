@@ -2,9 +2,11 @@
 # Licensed under the MIT license. See LICENSE.md file in the project root
 # for full license information.
 # ==============================================================================
-
+"""
+Axis for CNTK variables on data binding.
+"""
 from . import cntk_py
-from .utils import typemap
+from cntk.internal.swig_helper import typemap
 
 class Axis(cntk_py.Axis):
     '''
@@ -31,7 +33,7 @@ class Axis(cntk_py.Axis):
         Returns True if the axis is ordered; i.e. if there is an ordering between the dimensions along the axis.
 
         Returns:
-            `bool`: True if this axis is ordered and False otherwise
+            bool: True if this axis is ordered and False otherwise
         '''
         return super(Axis, self).is_ordered()
 
@@ -41,7 +43,7 @@ class Axis(cntk_py.Axis):
         Returns True if the axis is of type static and False otherwise
 
         Returns:
-            `bool`: True if this axis is of type static and False otherwise
+            bool: True if this axis is of type static and False otherwise
         '''
         return super(Axis, self).is_static_axis()
 
@@ -51,7 +53,7 @@ class Axis(cntk_py.Axis):
         Returns the name of this axis.
 
         Returns:
-            `str`: the name of this axis.
+            str: the name of this axis.
         '''
         return super(Axis, self).name()
 
@@ -60,10 +62,10 @@ class Axis(cntk_py.Axis):
         Returns the integer with which the static axis is defined. For example, 0 = first axis, 1 = second axis, etc.
 
         Args:
-            checked (`bool`): if True then this function will throw an exception if the axis is not static.
+            checked (bool): if True then this function will throw an exception if the axis is not static.
 
         Returns:
-            `int`: the number with which the static axis is defined.
+            int: the number with which the static axis is defined.
         '''
         return super(Axis, self).static_axis_index(checked)
 
@@ -93,7 +95,7 @@ class Axis(cntk_py.Axis):
     @typemap
     def all_static_axes():
         '''
-        Returns an Axis object representing all the static axes of an operand.
+        Axis object representing all the static axes of an operand.
 
         Returns:
             :class:`Axis`: all static axes
@@ -102,14 +104,58 @@ class Axis(cntk_py.Axis):
 
     @staticmethod
     @typemap
+    def all_axes():
+        '''
+        Axis object representing all the axes--static and dynamic--of an operand.
+
+        Returns:
+            :class:`Axis`: all axes
+        '''
+        return cntk_py.Axis.all_axes()
+
+    @staticmethod
+    @typemap
+    def default_input_variable_dynamic_axes():
+        '''
+        Default dynamic axes of the input variable
+
+        Returns:
+            tuple of :class:`Axis`: instances
+        '''
+        return tuple(reversed(cntk_py.Axis.default_input_variable_dynamic_axes()))
+
+    @staticmethod
+    @typemap
+    def unknown_dynamic_axes():
+        '''
+        Unknown dynamic axes
+
+        Returns:
+            tuple of :class:`Axis`: instances
+        '''
+        return tuple(reversed(cntk_py.Axis.unknown_dynamic_axes()))
+
+    @staticmethod
+    @typemap
     def new_unique_dynamic_axis(name):
         '''
         Creates an Axis object representing a new unique dynamic axis.
 
         Args:
-            name (`str`): name of the dynmic axis
+            name (str): name of the dynmic axis
 
         Returns:
             :class:`Axis`: new unique dynamic axis
         '''
         return cntk_py.Axis.new_unique_dynamic_axis(name)
+
+    @staticmethod
+    @typemap
+    def new_leading_axis():
+        '''
+        Creates an Axis object representing a new leading static axis.
+
+        Returns:
+            :class:`Axis`: axis object representing a new leading static axis.
+        '''
+        return cntk_py.Axis.end_static_axis()

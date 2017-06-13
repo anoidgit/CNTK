@@ -21,7 +21,6 @@
 #include <vld.h> // leak detection
 #endif
 #include "BestGpu.h"
-#include "MPIWrapper.h"
 #include "DataDeserializer.h"
 #include "SequencePacker.h"
 #include "NoRandomizer.h"
@@ -29,11 +28,7 @@
 #include "InputAndParamNodes.h"
 #include "latticearchive.h"
 #include <limits>
-
-// TODO: Temporary mechanism to enable memory sharing for
-// node output value matrices. This will go away when the
-// sharing is ready to be enabled by default
-bool g_shareNodeValueMatrices = false;
+#include "RecurrentNodes.h"
 
 namespace Microsoft { namespace MSR { namespace CNTK {
 
@@ -44,7 +39,8 @@ void CNTKEvalBase<ElemType>::Init(const std::string& config)
     m_config.Parse(config);
     size_t nThreads = m_config("numCPUThreads", "1");
     CPUMatrix<ElemType>::SetNumThreads(nThreads);
-    g_shareNodeValueMatrices = m_config(L"shareNodeValueMatrices", false);
+
+    Globals::SetShareNodeValueMatrices(m_config(L"shareNodeValueMatrices", true));
 }
 
 
@@ -152,7 +148,7 @@ void CNTKEval<ElemType>::GetNodeDimensions(std::map<std::wstring, size_t>& dimen
 }
 
 // StartEvaluateMinibatchLoop - Prepare network for Evaluate() calls.
-// ouputNodeName - name of node that will be evaluated
+// outputNodeName - name of node that will be evaluated
 template <typename ElemType>
 void CNTKEval<ElemType>::StartEvaluateMinibatchLoop(const std::wstring& outputNodeName)
 {
@@ -358,11 +354,12 @@ void CNTKEvalExtended<ElemType>::ForwardPassT(const std::vector<ValueBuffer<Elem
         }
 
         int numCols = type == MatrixType::DENSE ? buffer.m_buffer.size() / numRows : buffer.m_colIndices.size() - 1;
-        assert(numCols >= 1);
+        if (numCols < 1)
+            RuntimeError("Input: the number of column must be greater than or equal to 1.");
         inputNode->GetMBLayout()->Init(1, numCols);
         
-        // INT_MIN is used to specify the lower bound of look-back step of recurrent nodes
-        inputNode->GetMBLayout()->AddSequence(0, 0, resetRNN ? 0 : INT_MIN, numCols);
+        // SentinelValueIndicatingUnspecifedSequenceBeginIdx is used to specify the lower bound of look-back step of recurrent nodes
+        inputNode->GetMBLayout()->AddSequence(0, 0, resetRNN ? 0 : SentinelValueIndicatingUnspecifedSequenceBeginIdx, numCols);
 
         if (type == MatrixType::DENSE)
             matrix->SetValue(numRows, numCols, matrix->GetDeviceId(), buffer.m_buffer.data(), matrixFlagNormal);
@@ -378,11 +375,12 @@ void CNTKEvalExtended<ElemType>::ForwardPassT(const std::vector<ValueBuffer<Elem
     }
 
     ComputationNetwork::BumpEvalTimeStamp(m_inputNodes);
+    this->m_net->ForwardProp(m_outputNodes);
 
-    for (size_t i = 0; i < m_outputNodes.size(); ++i)
+    for (size_t i2 = 0; i2 < m_outputNodes.size(); ++i2)
     {
-        auto node = m_outputNodes[i];
-        this->m_net->ForwardProp(node);
+        auto node = m_outputNodes[i2];
+        
         shared_ptr<Matrix<ElemType>> outputMatrix = dynamic_pointer_cast<Matrix<ElemType>>(node->ValuePtr());
         auto pMBLayout = node->GetMBLayout();
         if (!pMBLayout)
@@ -395,7 +393,7 @@ void CNTKEvalExtended<ElemType>::ForwardPassT(const std::vector<ValueBuffer<Elem
         if (seq.size() != 1)
             RuntimeError("Only 1 output sequence supported by this API");
 
-        ValueContainer<ElemType>& vec = outputs[i].m_buffer;
+        ValueContainer<ElemType>& vec = outputs[i2].m_buffer;
 
         size_t numElements = outputMatrix->GetNumElements();
 

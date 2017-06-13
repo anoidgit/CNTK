@@ -21,6 +21,7 @@
 #include "CorpusDescriptor.h"
 #include "ConfigUtil.h"
 #include "StringUtil.h"
+#include "ReaderConstants.h"
 
 namespace Microsoft { namespace MSR { namespace CNTK {
 
@@ -29,10 +30,19 @@ namespace Microsoft { namespace MSR { namespace CNTK {
 // For more information please see its header file.
 // This method composes together packers + randomizer + a set of transformers and deserializers.
 CompositeDataReader::CompositeDataReader(const ConfigParameters& config) :
-    m_corpus(std::make_shared<CorpusDescriptor>()), m_truncationLength(0)
+    m_truncationLength(0)
 {
     wstring action = config(L"action", L"");
     bool isActionWrite = AreEqualIgnoreCase(action, L"write");
+
+    // We currently by default using numeric keys for ctf and image deserializers.
+    bool useNumericSequenceKeys = ContainsDeserializer(config, L"CNTKTextFormatDeserializer") ||
+        ContainsDeserializer(config, L"ImageDeserializer") || ContainsDeserializer(config, L"Base64ImageDeserializer");
+
+    useNumericSequenceKeys = config(L"useNumericSequenceKeys", useNumericSequenceKeys);
+
+    bool useHash = config(L"hashSequenceKeys", false);
+    m_corpus = std::make_shared<CorpusDescriptor>(useNumericSequenceKeys, useHash);
 
     // Identifying packing mode.
     bool frameMode = config(L"frameMode", false);
@@ -87,23 +97,54 @@ CompositeDataReader::CompositeDataReader(const ConfigParameters& config) :
     int verbosity = config(L"verbosity", 0);
 
     // Pick up the randomizer, always picking up no randomization for the write mode.
-    bool randomize = isActionWrite ? false : config(L"randomize", false);
+    bool randomize = isActionWrite ? false : config(L"randomize", true);
+
+    // Get maximum number of allowed errors per worker.
+    size_t maxErrors = config(L"maxErrors", 0);
 
     // By default do not use omp threads for deserialization of sequences.
     // It makes sense to put it to true for cases when deserialization is CPU intensive,
     // i.e. decompression of images.
-    bool multiThreadedDeserialization = config(L"multiThreadedDeserialization", false);
+    bool multiThreadedDeserialization = config(L"multiThreadedDeserialization", ContainsDeserializer(config, L"ImageDeserializer"));
     if (randomize)
     {
         // By default randomizing the whole data set.
-        size_t randomizationWindow = config(L"randomizationWindow", requestDataSize);
-        // By default using STL random number generator.
-        bool useLegacyRandomization = config(L"useLegacyRandomization", false);
-        m_sequenceEnumerator = std::make_shared<BlockRandomizer>(verbosity, randomizationWindow, deserializer, true /* should Prefetch */, BlockRandomizer::DecimationMode::chunk, useLegacyRandomization, multiThreadedDeserialization);
+        size_t randomizationWindow = requestDataSize;
+
+        // Currently in case of images, a single chunk is a single image. So no need to randomize, chunks will be randomized anyway.
+        if (ContainsDeserializer(config, L"ImageDeserializer") && m_deserializers.size() == 1)
+        {
+            randomizationWindow = 1;
+            m_packingMode = PackingMode::sample;
+        }
+
+        randomizationWindow = config(L"randomizationWindow", randomizationWindow);
+        bool sampleBasedRandomizationWindow = config(L"sampleBasedRandomizationWindow", true);
+
+        if (ContainsDeserializer(config, L"CNTKTextFormatDeserializer") && !config.ExistsCurrent(L"randomizationWindow"))
+        {
+            if (!config.ExistsCurrent(L"sampleBasedRandomizationWindow") || // sampleBasedRandomizationWindow is not specified
+                !sampleBasedRandomizationWindow) // randomization window is in chunks
+            {
+                sampleBasedRandomizationWindow = false;
+                size_t chunkSizeBytes = config(L"chunkSizeInBytes", g_32MB); // 32 MB by default
+                randomizationWindow = g_4GB / chunkSizeBytes; // ~ 4 GB disk space worth of chunks
+                // TODO: decrease randomization window if m_deserializers.size() > 1 ?
+            }
+            else
+            {
+                // config explicitly says to use a sample-based window, but does not specify its size.
+                LogicError("'sampleBasedRandomizationWindow' (== 'true') requires that the 'randomizationWindow' is explicitly specified.");
+            }
+        }
+
+        bool shouldPrefetch = true;
+        m_sequenceEnumerator = std::make_shared<BlockRandomizer>(verbosity, randomizationWindow, deserializer, shouldPrefetch, 
+            multiThreadedDeserialization, maxErrors, sampleBasedRandomizationWindow, GetRandomSeed(config));
     }
     else
     {
-        m_sequenceEnumerator = std::make_shared<NoRandomizer>(deserializer, multiThreadedDeserialization);
+        m_sequenceEnumerator = std::make_shared<NoRandomizer>(deserializer, multiThreadedDeserialization, maxErrors);
     }
 
     // In case when there are transforms, applying them to the data.
@@ -125,23 +166,37 @@ CompositeDataReader::CompositeDataReader(const ConfigParameters& config) :
         m_streams.push_back(stream);
     }
 
+    // Currently for prefetch we use two alternating buffers,
+    // same is the default.
+    size_t numAlternatingBuffers = 2;
+
+    // Check whether to use local timeline, by default we use it for better performance.
+    bool localTimeline = config(L"localTimeline", true);
     switch (m_packingMode)
     {
     case PackingMode::sample:
         m_packer = std::make_shared<FramePacker>(
             m_sequenceEnumerator,
-            m_streams);
+            m_streams,
+            numAlternatingBuffers,
+            localTimeline,
+            m_corpus);
         break;
     case PackingMode::sequence:
         m_packer = std::make_shared<SequencePacker>(
             m_sequenceEnumerator,
-            m_streams);
+            m_streams,
+            numAlternatingBuffers,
+            localTimeline,
+            m_corpus);
         break;
     case PackingMode::truncated:
     {
         m_packer = std::make_shared<TruncatedBPTTPacker>(
             m_sequenceEnumerator,
-            m_streams);
+            m_streams,
+            numAlternatingBuffers,
+            m_corpus);
         break;
     }
     default:
@@ -164,6 +219,9 @@ void CompositeDataReader::CreateDeserializers(const ConfigParameters& readerConf
         readerConfig(L"deserializers", ConfigParameters::Array(argvector<ConfigValue>(vector<ConfigValue> {})));
 
     assert(m_deserializers.empty());
+
+    auto traceLevel = readerConfig.Find("traceLevel");
+
     bool primary = true;  // Currently, the first deserializer becomes primary - it drives chunking.
     for (size_t i = 0; i < deserializerConfigs.size(); ++i)
     {
@@ -171,6 +229,10 @@ void CompositeDataReader::CreateDeserializers(const ConfigParameters& readerConf
         ConfigParameters p = deserializerConfigs[i];
         p.Insert("frameMode", m_packingMode == PackingMode::sample ? "true" : "false");
         p.Insert("precision", m_precision);
+        if (!traceLevel.empty()) 
+        {
+            p.Insert("traceLevel", traceLevel);
+        }
 
         IDataDeserializerPtr d = CreateDeserializer(p, primary);
         primary = false;
@@ -281,6 +343,21 @@ void CompositeDataReader::StartEpoch(const EpochConfiguration& cfg, const std::m
     }
 
     ReaderBase::StartEpoch(config, inputDescriptions);
+}
+
+bool CompositeDataReader::ContainsDeserializer(const ConfigParameters& readerConfig, const wstring& type)
+{
+    argvector<ConfigValue> deserializerConfigs =
+        readerConfig(L"deserializers", ConfigParameters::Array(argvector<ConfigValue>(vector<ConfigValue> {})));
+
+    for (size_t i = 0; i < deserializerConfigs.size(); ++i)
+    {
+        ConfigParameters p = deserializerConfigs[i];
+        std::wstring deserializerType = p("type");
+        if (deserializerType == type)
+            return true;
+    }
+    return false;
 }
 
 }}}

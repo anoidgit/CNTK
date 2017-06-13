@@ -28,11 +28,27 @@ namespace CNTK
     const std::wstring rootKey = L"root";
     const std::wstring functionsKey = L"primitive_functions";
     const std::wstring sampleCountKey = L"sample_count";
-    const std::wstring minibatchCountKey = L"minibatchCount";
+    const std::wstring minibatchCountKey = L"minibatchCount"; // TODO: Python-style spelling
     const std::wstring unitKey = L"unit";
     const std::wstring epochSizeKey = L"epoch_size";
     const std::wstring scheduleKey = L"schedule";
     const std::wstring learningRateScheduleKey = L"learnig_rate_schedule";
+    const std::wstring smoothedGradientsKey = L"smoothed_gradients";
+    const std::wstring noiseInjectionSeedKey = L"noise_injection_seed";
+    const std::wstring smoothedCountKey = L"smoothed_count";
+    const std::wstring stateKey = L"state";
+    const std::wstring rngSeedKey = L"rng_seed";
+    const std::wstring rngOffsetKey = L"rng_offset";
+    const std::wstring blockFunctionCompositeKey = L"block_function_composite";
+    const std::wstring blockFunctionOpNameKey = L"block_function_op_name";
+    const std::wstring blockFunctionCompositeArgumentsMapKeysKey = L"block_function_composite_arguments_map_keys";
+    const std::wstring blockFunctionCompositeArgumentsMapValuesKey = L"block_function_composite_arguments_map_values";
+    const std::wstring internalWorkerStateKey = L"internal_worker_state";
+    const std::wstring externalWorkerStateKey = L"external_worker_state";
+    const std::wstring userDefinedStateKey = L"user_defined_state";
+    const std::wstring udfModuleNameKey = L"module";
+    const std::wstring udfFactoryMethodNameKey = L"deserialize_method";
+    const std::wstring nativeUDFKey = L"native";
 
     template <typename T> 
     inline std::string GetVersionsString(size_t currentVersion, size_t dictVersion)
@@ -46,9 +62,8 @@ namespace CNTK
     inline size_t GetVersion(const Dictionary& dict)
     {
         if (!dict.Contains(versionKey))
-        {
              LogicError("Required key '%ls' is not found in the dictionary.", versionKey.c_str());
-        } 
+
         return dict[versionKey].Value<size_t>();
     }
 
@@ -58,16 +73,16 @@ namespace CNTK
         if (!dict.Contains(typeKey))
         {
             const auto& version = GetVersion(dict);
-            LogicError("Required key '%ls' is not found in the dictionary "
-                            "(%s).", typeKey.c_str(), GetVersionsString<T>(currentVersion, version).c_str());
+            LogicError("Required key '%ls' is not found in the dictionary (%s).",
+                       typeKey.c_str(), GetVersionsString<T>(currentVersion, version).c_str());
         } 
 
         const auto& type = dict[typeKey].Value<std::wstring>();
         if (type != typeValue) 
         {
             const auto& version = GetVersion(dict);
-            LogicError("Unexpected '%ls':'%ls' in place of '%ls':'%ls' "
-                        "(%s).", typeKey.c_str(), type.c_str(), typeKey.c_str(), typeValue.c_str(), GetVersionsString<T>(currentVersion, version).c_str());
+            LogicError("Unexpected '%ls':'%ls' in place of '%ls':'%ls' (%s).",
+                       typeKey.c_str(), type.c_str(), typeKey.c_str(), typeValue.c_str(), GetVersionsString<T>(currentVersion, version).c_str());
         }
     }
 
@@ -82,24 +97,13 @@ namespace CNTK
         {
             if (!dict.Contains(key))
             {
-                 LogicError("Required key '%ls' is not found in the dictionary "
-                            "(%s).", key.c_str(), GetVersionsString<T>(currentVersion, version).c_str());
+                 LogicError("Required key '%ls' is not found in the dictionary (%s).",
+                            key.c_str(), GetVersionsString<T>(currentVersion, version).c_str());
             }
         }
 
         ValidateType<T>(dict, typeValue, currentVersion);
 
         return version;
-    }
-
-    inline bool IsLegacyModel(std::fstream& stream)
-    {
-        static const char legacyMarker[] = { 0x42, 0x00, 0x43, 0x00, 0x4e, 0x00, 0x00, 0x00 }; // L"BCN"
-        static const auto size = sizeof(legacyMarker);
-        char buffer[size];
-        const auto position = stream.tellg();
-        stream.read(buffer, size);
-        stream.seekg(position);
-        return (strcmp(legacyMarker, buffer) == 0);
     }
 }

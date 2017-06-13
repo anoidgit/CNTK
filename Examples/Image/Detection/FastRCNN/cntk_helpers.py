@@ -1,3 +1,9 @@
+# Copyright (c) Microsoft. All rights reserved.
+
+# Licensed under the MIT license. See LICENSE.md file in the project root
+# for full license information.
+# ==============================================================================
+
 from __future__ import print_function
 from builtins import str
 import pdb, sys, os, time
@@ -7,6 +13,15 @@ from easydict import EasyDict
 from fastRCNN.nms import nms as nmsPython
 from builtins import range
 
+import cv2, copy, textwrap
+from PIL import Image, ImageFont, ImageDraw
+from PIL.ExifTags import TAGS
+
+available_font = "arial.ttf"
+try:
+    dummy = ImageFont.truetype(available_font, 16)
+except:
+    available_font = "FreeMono.ttf"
 
 ####################################
 # Region-of-interest
@@ -103,7 +118,7 @@ def filterRois(rects, maxWidth, maxHeight, roi_minNrPixels, roi_maxNrPixels,
 
 
 def readRois(roiDir, subdir, imgFilename):
-    roiPath = roiDir + subdir + "/" + imgFilename[:-4] + ".roi.txt"
+    roiPath = os.path.join(roiDir, subdir, imgFilename[:-4] + ".roi.txt")
     rois = np.loadtxt(roiPath, np.int)
     if len(rois) == 4 and type(rois[0]) == np.int32:  # if only a single ROI in an image
         rois = [rois]
@@ -122,10 +137,10 @@ def readGtAnnotation(imgPath):
     return bboxes, labels
 
 def getCntkInputPaths(cntkFilesDir, image_set):
-    cntkImgsListPath = cntkFilesDir + image_set + '.txt'
-    cntkRoiCoordsPath = cntkFilesDir + image_set + '.rois.txt'
-    cntkRoiLabelsPath = cntkFilesDir + image_set + '.roilabels.txt'
-    cntkNrRoisPath = cntkFilesDir + image_set + '.nrRois.txt'
+    cntkImgsListPath = os.path.join(cntkFilesDir, image_set + '.txt')
+    cntkRoiCoordsPath = os.path.join(cntkFilesDir, image_set + '.rois.txt')
+    cntkRoiLabelsPath = os.path.join(cntkFilesDir, image_set + '.roilabels.txt')
+    cntkNrRoisPath = os.path.join(cntkFilesDir, image_set + '.nrRois.txt')
     return cntkImgsListPath, cntkRoiCoordsPath, cntkRoiLabelsPath, cntkNrRoisPath
 
 def roiTransformPadScaleParams(imgWidth, imgHeight, padWidth, padHeight, boResizeImg = True):
@@ -225,7 +240,7 @@ def parseCntkOutput(cntkImgsListPath, cntkOutputPath, outParsedDir, cntkNrRois, 
 
             # save
             data = np.array(data, np.float32)
-            outPath = outParsedDir + str(imgIndex) + ".dat"
+            outPath = os.path.join(outParsedDir, str(imgIndex) + ".dat")
             if saveCompressed:
                 np.savez_compressed(outPath, data)
             else:
@@ -430,7 +445,10 @@ def visualizeResults(imgPath, roiLabels, roiScores, roiRelCoords, padWidth, padH
                 drawRectangles(imgDebug, [rect], color=color, thickness=thickness)
             elif iter == 2 and label > 0:
                 if not nmsKeepIndices or (roiIndex in nmsKeepIndices):
-                    font = ImageFont.truetype("arial.ttf", 18)
+                    try:
+                        font = ImageFont.truetype(available_font, 18)
+                    except:
+                        font = ImageFont.load_default()
                     text = classes[label]
                     if roiScores:
                         text += "(" + str(round(score, 2)) + ")"
@@ -550,16 +568,12 @@ def im_detect(net, im, boxes, feature_scale=None, bboxIndices=None, boReturnClas
 #    slotName      = e.g. "movie" in: play <movie> terminator </movie>
 #    slot          = e.g. "<movie> terminator </movie>" in: play <movie> terminator </movie>
 
-import cv2, copy, textwrap
-from PIL import Image, ImageFont, ImageDraw
-from PIL.ExifTags import TAGS
-
 def makeDirectory(directory):
     if not os.path.exists(directory):
         os.makedirs(directory)
 
 def getFilesInDirectory(directory, postfix = ""):
-    fileNames = [s for s in os.listdir(directory) if not os.path.isdir(directory+"/"+s)]
+    fileNames = [s for s in os.listdir(directory) if not os.path.isdir(os.path.join(directory, s))]
     if not postfix or postfix == "":
         return fileNames
     else:
@@ -612,7 +626,7 @@ def deleteAllFilesInDirectory(directory, fileEndswithString, boPromptUser = Fals
             exit()
     for filename in getFilesInDirectory(directory):
         if fileEndswithString == None or filename.lower().endswith(fileEndswithString):
-            deleteFile(directory + "/" + filename)
+            deleteFile(os.path.join(directory, filename))
 
 def removeLineEndCharacters(line):
     if line.endswith(b'\r\n'):
@@ -646,7 +660,7 @@ def sortDictionary(dictionary, sortIndex=0, reverseSort=False):
 
 def imread(imgPath, boThrowErrorIfExifRotationTagSet = True):
     if not os.path.exists(imgPath):
-        "ERROR: image path does not exist."
+        print("ERROR: image path does not exist.")
         error
 
     rotation = rotationFromExifTag(imgPath)
@@ -750,12 +764,20 @@ def ptClip(pt, maxWidth, maxHeight):
     pt[1] = min(pt[1], maxHeight)
     return pt
 
-def drawText(img, pt, text, textWidth=None, color = (255,255,255), colorBackground = None, font = ImageFont.truetype("arial.ttf", 16)):
+def drawText(img, pt, text, textWidth=None, color = (255,255,255), colorBackground = None, font = None):
+    # loading default value in function call so the script won't cause errors in system where 
+    # "arial.ttf" cannot be found
+    if font == None:
+        font = ImageFont.truetype("arial.ttf", 16)
     pilImg = imconvertCv2Pil(img)
     pilImg = pilDrawText(pilImg,  pt, text, textWidth, color, colorBackground, font)
     return imconvertPil2Cv(pilImg)
 
-def pilDrawText(pilImg, pt, text, textWidth=None, color = (255,255,255), colorBackground = None, font = ImageFont.truetype("arial.ttf", 16)):
+def pilDrawText(pilImg, pt, text, textWidth=None, color = (255,255,255), colorBackground = None, font = None):
+    # loading default value in function call so the script won't cause errors in system where 
+    # "arial.ttf" cannot be found
+    if font == None:
+        font = ImageFont.truetype("arial.ttf", 16)
     textY = pt[1]
     draw = ImageDraw.Draw(pilImg)
     if textWidth == None:

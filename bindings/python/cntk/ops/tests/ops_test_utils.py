@@ -8,87 +8,108 @@
 Utils for operations unit tests
 """
 
+import os
 import numpy as np
-import pytest
-
+import cntk as C
 from cntk.tests.test_utils import *
-
+from cntk.device import cpu, gpu
 from ...ops.functions import Function
-from ...utils import sanitize_dtype_cntk
-from ...utils import eval as cntk_eval, cntk_device
-from .. import constant, input_variable
-
-I = input_variable
+from cntk.internal import sanitize_dtype_cntk
+from cntk.internal.utils import eval as cntk_eval
+from .. import constant
 
 
-@pytest.fixture(params=["dense", "sparse"])
-def left_matrix_type(request):
-    return request.param
+def cntk_device(device_id):
+    '''
+    Converts the legacy device ID as it was used in CNTK 1 to a :class:`~cntk.device.DeviceDescriptor` instance.
+
+    Args:
+        device_id (int): device id, -1 for CPU, 0 or higher for GPU
+
+    Returns:
+        :class:`~cntk.device.DeviceDescriptor`
+    '''
+    if device_id == -1:
+        return cpu()
+    else:
+        return gpu(device_id)
 
 
-@pytest.fixture(params=["dense", "sparse"])
-def right_matrix_type(request):
-    return request.param
+def os_process():
+    '''
+    Returns the process instance, which can be used e.g. to check the memory
+    usage.
+    '''
+    import psutil
+    return psutil.Process(os.getpid())
+
+
+def mem_used(process):
+    '''
+    Return the non-swapped physical memory the Python process is using.
+    '''
+    return process.memory_info().rss
 
 
 def _test_unary_op(precision, device_id, op_func,
-                   value, expected_forward, expected_backward_all, op_param_dict=None):
+                   value, expected_forward, expected_backward_all, op_param_dict={}):
 
     value = AA(value, dtype=PRECISION_TO_TYPE[precision])
 
-    a = I(shape=value.shape,
-          data_type=sanitize_dtype_cntk(PRECISION_TO_TYPE[precision]),
-          needs_gradient=True,
-          name='a')
+    a = C.input_variable(shape=value.shape,
+              dtype=sanitize_dtype_cntk(PRECISION_TO_TYPE[precision]),
+              needs_gradient=True,
+              name='a')
 
     # create batch
-    value.shape = (1, 1) + value.shape
+    value.shape = (1,) + value.shape
 
     if (type(op_func) == str):
         input_op = eval('%s a' % op_func)
-    elif op_param_dict:
-        input_op = op_func(a, **op_param_dict)
     else:
-        input_op = op_func(a)
+        input_op = op_func(a, **op_param_dict)
 
     forward_input = {a: value}
-    expected_backward = {a: expected_backward_all['arg'], }
+    expected_backward = {a: expected_backward_all['arg'], } if expected_backward_all is not None else None
     unittest_helper(input_op,
                     forward_input, expected_forward, expected_backward,
                     device_id=device_id, precision=precision)
 
 
 def _test_binary_op(precision, device_id, op_func, left_operand, right_operand,
-                    expected_forward, expected_backward_all,
-                    only_input_variables=False, wrap_batch_seq=True):
+                    expected_forward, expected_backward_all, wrap_batch_seq=True, op_param_dict={}):
+    dt = PRECISION_TO_TYPE[precision]
+    dev = cntk_device(device_id)
 
-    left_value = AA(left_operand, dtype=PRECISION_TO_TYPE[precision])
-    right_value = AA(right_operand, dtype=PRECISION_TO_TYPE[precision])
+    left_value = AA(left_operand, dtype=dt)
+    right_value = AA(right_operand, dtype=dt)
 
-    a = I(shape=left_value.shape,
-          data_type=sanitize_dtype_cntk(precision),
-          needs_gradient=True,
-          name='a')
+    a = C.input_variable(shape=left_value.shape,
+              dtype=sanitize_dtype_cntk(precision),
+              needs_gradient=True,
+              name='a')
 
-    b = I(shape=right_value.shape,
-          data_type=sanitize_dtype_cntk(precision),
-          needs_gradient=True,
-          name='b')
+    b = C.input_variable(shape=right_value.shape,
+              dtype=sanitize_dtype_cntk(precision),
+              needs_gradient=True,
+              name='b')
+
+    const_a = constant(left_value, device=dev)
+    const_b = constant(right_value, device=dev)
 
     if (type(op_func) == str):
-        input_op_constant = eval('a %s right_operand' % op_func)
-        constant_op_input = eval('left_operand %s b' % op_func)
+        input_op_constant = eval('a %s const_b' % op_func)
+        constant_op_input = eval('const_a %s b' % op_func)
         input_op_input = eval('a %s b' % op_func)
     else:
-        input_op_constant = op_func(a, right_value)
-        constant_op_input = op_func(left_value, b)
-        input_op_input = op_func(a, b)
+        input_op_constant = op_func(a, const_b, **op_param_dict)
+        constant_op_input = op_func(const_a, b, **op_param_dict)
+        input_op_input = op_func(a, b, **op_param_dict)
 
-    # create batch by wrapping the data point into a sequence of length one and
-    # putting it into a batch of one sample
+    # create batch by wrapping the data point into a batch of one sample
     if wrap_batch_seq:
-        left_value.shape = (1, 1) + left_value.shape
-        right_value.shape = (1, 1) + right_value.shape
+        left_value.shape = (1,) + left_value.shape
+        right_value.shape = (1,) + right_value.shape
 
     forward_input = {a: left_value, b: right_value}
     expected_backward = {a: expected_backward_all[
@@ -97,18 +118,17 @@ def _test_binary_op(precision, device_id, op_func, left_operand, right_operand,
                     forward_input, expected_forward, expected_backward,
                     device_id=device_id, precision=precision)
 
-    if not only_input_variables:
-        forward_input = {a: left_value}
-        expected_backward = {a: expected_backward_all['left_arg'], }
-        unittest_helper(input_op_constant,
-                        forward_input, expected_forward, expected_backward,
-                        device_id=device_id, precision=precision)
+    forward_input = {a: left_value}
+    expected_backward = {a: expected_backward_all['left_arg'], }
+    unittest_helper(input_op_constant,
+                    forward_input, expected_forward, expected_backward,
+                    device_id=device_id, precision=precision)
 
-        forward_input = {b: right_value}
-        expected_backward = {b: expected_backward_all['right_arg'], }
-        unittest_helper(constant_op_input,
-                        forward_input, expected_forward, expected_backward,
-                        device_id=device_id, precision=precision)
+    forward_input = {b: right_value}
+    expected_backward = {b: expected_backward_all['right_arg'], }
+    unittest_helper(constant_op_input,
+                    forward_input, expected_forward, expected_backward,
+                    device_id=device_id, precision=precision)
 
 
 def unittest_helper(root_node,
@@ -116,6 +136,7 @@ def unittest_helper(root_node,
                     device_id=-1, precision="float"):
 
     assert isinstance(root_node, Function)
+
     backward_pass = expected_backward is not None
     forward, backward = cntk_eval(root_node, forward_input, precision,
             cntk_device(device_id), backward_pass, expected_backward)
@@ -161,7 +182,6 @@ def batch_dense_to_sparse(batch, dynamic_axis=''):
 
     batch_indices = []
     batch_values = []
-    tensor_shape = []
 
     shapes_in_tensor = set()
 
@@ -227,3 +247,23 @@ def test_batch_dense_to_sparse_zeros():
         [40, 50, 60]
     ]
     assert s == (2, 3)
+
+def remove_np_array_in_list(arr, l):
+    index = 0
+    size = len(l)
+    while index != size and not np.allclose(l[index], arr, atol=TOLERANCE_ABSOLUTE):
+        index += 1
+    if index != size:
+        l.pop(index)
+    else:
+        raise ValueError('array not found in list.')
+
+# compare two unordered lists of np arrays
+def compare_lists_of_np_arrays(first_list, second_list):
+    second_list = list(second_list)   # make a mutable copy
+    try:
+        for elem in first_list:
+            remove_np_array_in_list(elem, second_list)
+    except ValueError:
+        return False
+    return not second_list

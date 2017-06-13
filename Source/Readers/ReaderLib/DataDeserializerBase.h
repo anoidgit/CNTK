@@ -9,12 +9,14 @@
 
 namespace Microsoft { namespace MSR { namespace CNTK {
 
+struct Index;
+
 // Base class for data deserializers.
 // Has a default implementation for a subset of methods.
 class DataDeserializerBase : public IDataDeserializer
 {
 public:
-    DataDeserializerBase()
+    DataDeserializerBase(bool primary) : m_primary(primary)
     {}
 
     virtual bool GetSequenceDescription(const SequenceDescription& primary, SequenceDescription& result) override
@@ -33,8 +35,13 @@ protected:
         NOT_IMPLEMENTED;
     }
 
+    bool GetSequenceDescriptionByKey(const Index& index, const KeyType& key, SequenceDescription& r);
+
     // Streams this data deserializer can produce.
     std::vector<StreamDescriptionPtr> m_streams;
+
+    // Flag, indicating if the deserializer is primary.
+    const bool m_primary;
 
 private:
     DISABLE_COPY_AND_MOVE(DataDeserializerBase);

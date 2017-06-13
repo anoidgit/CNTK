@@ -14,9 +14,12 @@
 #endif
 
 #include "Basics.h"
+#include "basetypes.h"
 #include <string>
 #include <stdint.h>
 #include <memory>
+#include <unordered_map>
+#include <map>
 
 #pragma warning( disable: 4251 )
 typedef unsigned char byte;
@@ -61,11 +64,13 @@ public:
     template <typename AllocatedElemType>
     static void Free(int deviceId, AllocatedElemType* bufferPtr, bool ignoreCUDARetCode = false);
 
+    // Let it be public method, the memory manager could check the totoal free memory and decide whether to physically
+    // release all the cached memory.
+    static std::pair<size_t, size_t> GetFreeAndTotalMemoryInMBs(int deviceId);
+
 private:
     template <typename AllocatedElemType>
     static AllocatedElemType* AllocateNoTrace(int deviceId, size_t numElements);
-
-    static std::pair<size_t, size_t> GetFreeAndTotalMemoryInMBs(int deviceId);
 };
 
 // -----------------------------------------------------------------------
@@ -80,12 +85,12 @@ enum ElementWiseOperator
     // unary (or binary with constant parameter)
     opCopy,
     opNegate, opNot, opAbs, opFloor, opReciprocal,
-    opSigmoid, opTanh, opSqr, opSqrt, opExp, opLog, opLinearRectifier, opCosine, opSin,
+    opSigmoid, opTanh, opSqr, opSqrt, opExp, opLog, opLinearRectifier, opCosine, opSin, opExponentialLinearUnit, opStableSigmoid,
     // unary ops for use by Matrix class only (there is no TensorView implementation)
-    opSigmoidDerivative, opLinearRectifierDerivative, opNegativeSine,
+    opSigmoidDerivative, opLinearRectifierDerivative, opNegativeSine, opExponentialLinearUnitDerivative, opStableSigmoidDerivative,
     // binary
-    opCopyIf, opCopyIfNot, opSum, opDifference, opElementwiseProduct, opElementwiseQuotient, opLogSum,
-    opMax, opMin,
+    opCopyIf, opCopyIfNot, opSum, opDifference, opElementwiseProduct, opElementwiseQuotient, opLogSum, opPow,
+    opMax, opMin, opArgmax, opArgmin,
     opLess, opEqual, opGreater, opGreaterEqual, opNotEqual, opLessEqual, // Note: must obey this order: (sgn(a-b) == -1, 0, +1), (sgn(a-b) != -1, 0, +1)
     opAnd, opOr, opXor, opMaskNegative,
     opElementwiseProductWithSigmoidDerivativeFromOutput, opElementwiseProductWithTanhDerivativeFromOutput,
@@ -93,6 +98,7 @@ enum ElementWiseOperator
     opElementwiseProductWithCosDerivative, opElementwiseProductWithSinDerivative,
     opElementwiseProductWithAbsDerivative, opElementwiseProductWithSqrtDerivative,
     opElementwiseProductWithReciprocalDerivative, opSqrOfDifference,
+    opElementwiseProductWithExponentialLinearUnitDerivativeFromOutput,
     // binary ops for indexing
     // opIndex,
     // ternary
@@ -101,6 +107,9 @@ enum ElementWiseOperator
     opElementwiseProductWithLogSumDerivative,
     opCopyIfEqual,
     opElementwiseProductWithExpOfDiff, /* a * exp(b - c) */
+    opElementwiseProductWithQuotient, /* a * (b / c) */
+    opElementwiseProductWithPowExponentDerivative, /* a * b * log(c) */
+    opElementwiseProductWithPowBaseDerivative,  /* a * c * pow(b, c-1) */
     // Note: not all that's implemented in CNTK ComputationNodes has an opcode yet.
 };
 
@@ -108,53 +117,57 @@ enum ElementWiseOperator
 #define ForAllNullaryOps(Macro) \
     Macro(ConstOne);
 
-#define ForAllUnaryOps(Macro) \
-    Macro(Copy);              \
-    Macro(Negate);            \
-    Macro(Not);               \
-    Macro(Abs);               \
-    Macro(Floor);             \
-    Macro(Reciprocal);        \
-    Macro(Sigmoid);           \
-    Macro(Tanh);              \
-    Macro(Sqr);               \
-    Macro(Sqrt);              \
-    Macro(Exp);               \
-    Macro(Log);               \
-    Macro(LinearRectifier);   \
-    Macro(Cosine);            \
-    Macro(Sin);
+#define ForAllUnaryOps(Macro)     \
+    Macro(Copy);                  \
+    Macro(Negate);                \
+    Macro(Not);                   \
+    Macro(Abs);                   \
+    Macro(Floor);                 \
+    Macro(Reciprocal);            \
+    Macro(Sigmoid);               \
+    Macro(Tanh);                  \
+    Macro(Sqr);                   \
+    Macro(Sqrt);                  \
+    Macro(Exp);                   \
+    Macro(Log);                   \
+    Macro(LinearRectifier);       \
+    Macro(Cosine);                \
+    Macro(Sin);                   \
+    Macro(ExponentialLinearUnit); \
+    Macro(StableSigmoid);
 
-#define ForAllBinaryOps(Macro)                                        \
-    Macro(CopyIf);                                                    \
-    Macro(CopyIfNot);                                                 \
-    Macro(Sum);                                                       \
-    Macro(Difference);                                                \
-    Macro(ElementwiseProduct);                                        \
-    Macro(ElementwiseQuotient);                                       \
-    Macro(LogSum);                                                    \
-    Macro(Max);                                                       \
-    Macro(Min);                                                       \
-    Macro(Equal);                                                     \
-    Macro(NotEqual);                                                  \
-    Macro(Greater);                                                   \
-    Macro(Less);                                                      \
-    Macro(GreaterEqual);                                              \
-    Macro(LessEqual);                                                 \
-    Macro(And);                                                       \
-    Macro(Or);                                                        \
-    Macro(Xor);                                                       \
-    Macro(MaskNegative);                                              \
-    Macro(ElementwiseProductWithSigmoidDerivativeFromOutput);         \
-    Macro(ElementwiseProductWithTanhDerivativeFromOutput);            \
-    Macro(ElementwiseProductWithLinearRectifierDerivativeFromOutput); \
-    Macro(ElementwiseProductWithLogDerivativeFromOutput);             \
-    Macro(ElementwiseProductWithCosDerivative);                       \
-    Macro(ElementwiseProductWithSinDerivative);                       \
-    Macro(ElementwiseProductWithAbsDerivative);                       \
-    Macro(ElementwiseProductWithReciprocalDerivative);                \
-    Macro(ElementwiseProductWithSqrtDerivative);                      \
-    Macro(SqrOfDifference);                                           \
+#define ForAllBinaryOps(Macro)                                               \
+    Macro(CopyIf);                                                           \
+    Macro(CopyIfNot);                                                        \
+    Macro(Sum);                                                              \
+    Macro(Difference);                                                       \
+    Macro(ElementwiseProduct);                                               \
+    Macro(ElementwiseQuotient);                                              \
+    Macro(LogSum);                                                           \
+    Macro(Pow);                                                              \
+    Macro(Max);                                                              \
+    Macro(Min);                                                              \
+    Macro(Equal);                                                            \
+    Macro(NotEqual);                                                         \
+    Macro(Greater);                                                          \
+    Macro(Less);                                                             \
+    Macro(GreaterEqual);                                                     \
+    Macro(LessEqual);                                                        \
+    Macro(And);                                                              \
+    Macro(Or);                                                               \
+    Macro(Xor);                                                              \
+    Macro(MaskNegative);                                                     \
+    Macro(ElementwiseProductWithSigmoidDerivativeFromOutput);                \
+    Macro(ElementwiseProductWithTanhDerivativeFromOutput);                   \
+    Macro(ElementwiseProductWithLinearRectifierDerivativeFromOutput);        \
+    Macro(ElementwiseProductWithLogDerivativeFromOutput);                    \
+    Macro(ElementwiseProductWithCosDerivative);                              \
+    Macro(ElementwiseProductWithSinDerivative);                              \
+    Macro(ElementwiseProductWithAbsDerivative);                              \
+    Macro(ElementwiseProductWithReciprocalDerivative);                       \
+    Macro(ElementwiseProductWithSqrtDerivative);                             \
+    Macro(SqrOfDifference);                                                  \
+    Macro(ElementwiseProductWithExponentialLinearUnitDerivativeFromOutput);
     //Macro(Index);
 
 #define ForAllTernaryOps(Macro)                         \
@@ -162,7 +175,10 @@ enum ElementWiseOperator
     Macro(CopyIfEqual);                                 \
     Macro(Clip);                                        \
     Macro(ElementwiseProductWithLogSumDerivative);      \
-    Macro(ElementwiseProductWithExpOfDiff);
+    Macro(ElementwiseProductWithExpOfDiff);             \
+    Macro(ElementwiseProductWithQuotient);              \
+    Macro(ElementwiseProductWithPowExponentDerivative); \
+    Macro(ElementwiseProductWithPowBaseDerivative);
 
 // -----------------------------------------------------------------------
 // various enums to describe
@@ -262,9 +278,10 @@ public:
                     TracingGPUMemoryAllocator::Free<ElemType>(m_computeDevice, m_pArray, true);
                 m_pArray = nullptr;
 
-                if (m_rowToId != nullptr)
-                    TracingGPUMemoryAllocator::Free<GPUSPARSE_INDEX_TYPE>(m_computeDevice, m_rowToId, true);
-                m_rowToId = nullptr;
+                if (m_tempDeviceBuffer != nullptr)
+                    TracingGPUMemoryAllocator::Free<GPUSPARSE_INDEX_TYPE>(m_computeDevice, m_tempDeviceBuffer, true);
+                m_tempDeviceBuffer = nullptr;
+                m_tempDeviceBufferSize = 0;
 #endif
 
                 delete[](byte*) m_tempHostBuffer;
@@ -304,8 +321,17 @@ protected:
     size_t GetBlockSize() const { return m_blockSize; }
     void SetBlockSize(size_t blockSize) { m_blockSize = blockSize; }
 
-    GPUSPARSE_INDEX_TYPE* GetRowToIdMap() const { return m_rowToId; }
-    void SetRowToIdMap(GPUSPARSE_INDEX_TYPE* parray) { m_rowToId = parray; }
+    GPUSPARSE_INDEX_TYPE* GetTempDeviceBuffer() const { return m_tempDeviceBuffer; }
+    void ReserveTempDeviceBuffer(const size_t minSize) const
+    { 
+        BaseMatrixStorage<ElemType>* nonConstThis = const_cast<BaseMatrixStorage<ElemType>*>(this);
+        if (minSize > m_tempDeviceBufferSize)
+        {
+            TracingGPUMemoryAllocator::Free<GPUSPARSE_INDEX_TYPE>(GetComputeDeviceId(), nonConstThis->m_tempDeviceBuffer);
+            nonConstThis->m_tempDeviceBuffer = TracingGPUMemoryAllocator::Allocate<GPUSPARSE_INDEX_TYPE>(GetComputeDeviceId(), minSize);
+            nonConstThis->m_tempDeviceBufferSize = minSize;
+        }
+    }
 
     void* GetTempHostBuffer() const { return m_tempHostBuffer; }
     void SetTempHostBuffer(void* buffer) const { m_tempHostBuffer = buffer; }
@@ -345,7 +371,8 @@ protected:
         m_elemSizeAllocated        = 0;
         m_totalBufferSizeAllocated = 0;
         m_blockSize                = 0; // block size
-        m_rowToId                  = nullptr; // the id showing the order row number is observed in the nnz values.
+        m_tempDeviceBuffer         = nullptr;
+        m_tempDeviceBufferSize     = 0;
         m_tempHostBuffer           = nullptr; // used to copy values.
         m_tempHostBufferSize       = 0;
         m_colIdx                   = 0; // used to SetValue()
@@ -379,7 +406,8 @@ protected:
 
     // used by the blockCol and blockRow format
     size_t m_blockSize;                      // block size
-    mutable GPUSPARSE_INDEX_TYPE* m_rowToId; // the id showing the order row number is observed in the nnz values.
+    mutable GPUSPARSE_INDEX_TYPE* m_tempDeviceBuffer;
+    mutable size_t m_tempDeviceBufferSize;
 
     mutable void* m_tempHostBuffer; // used to copy values.
     mutable size_t m_tempHostBufferSize;
@@ -494,8 +522,8 @@ protected:
     size_t GetBlockSize() const { return m_sob->GetBlockSize(); }
     void SetBlockSize(size_t blockSize) { m_sob->SetBlockSize(blockSize); }
 
-    GPUSPARSE_INDEX_TYPE* GetRowToIdMap() const { return m_sob->GetRowToIdMap(); }
-    void SetRowToIdMap(GPUSPARSE_INDEX_TYPE* parray) { m_sob->SetRowToIdMap(parray); }
+    GPUSPARSE_INDEX_TYPE* GetTempDeviceBuffer() const { return m_sob->GetTempDeviceBuffer(); }
+    void ReserveTempDeviceBuffer(const size_t minSize) const { m_sob->ReserveTempDeviceBuffer(minSize); }
 
     void* GetTempHostBuffer() const { return m_sob->GetTempHostBuffer(); }
     void SetTempHostBuffer(void* buffer) const { m_sob->SetTempHostBuffer(buffer); };

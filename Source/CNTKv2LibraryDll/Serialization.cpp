@@ -5,76 +5,177 @@
 
 #include "stdafx.h"
 #include "CNTKLibrary.h"
+#include "Utils.h"
 #include <istream>
 #include <ostream>
 #include <string>
 #include <vector>
 #include <limits>
 
+#ifdef _MSC_VER
+#include <io.h>
+#endif
+
 #pragma warning(push)
 #pragma warning(disable : 4800 4267 4610 4512 4100 4510)
 #include "CNTK.pb.h"
 #include <google/protobuf/io/zero_copy_stream_impl.h>
+#include <google/protobuf/arena.h>
 #pragma warning(pop)
-
-#if defined(_MSC_VER) || defined(_CODECVT_H)
-#include <codecvt>
-#else
-#include <cstdlib>
-#include <clocale>
-#endif
 
 namespace CNTK
 {
+
+    using namespace ::google::protobuf;
+
+    static const uint32 MAGIC_NUMBER = 0x636e746bU;
+    static const uint32 BLOCK_SIZE = 8 << 10; // 8Kb;
+
+    static void SetUTF8Locale()
+    {
+#ifndef _MSC_VER
+        if (std::setlocale(LC_ALL, "C.UTF-8") == nullptr)
+        {
+            std::setlocale(LC_ALL, "en_US.UTF-8");
+        }
+#endif
+    }
+
+    static void UnsetUTF8Locale()
+    {
+#ifndef _MSC_VER
+        std::setlocale(LC_ALL, "");
+#endif
+    }
+
+    struct UsingUTF8
+    {
+        UsingUTF8() { SetUTF8Locale(); }
+        ~UsingUTF8() { UnsetUTF8Locale(); }
+    };
+
+    // Variation on EncodeFloat/EncodeDouble/DecodeFloat/DecodeDouble from
+    // ::google::protobuf::internal::WireFormatLite.
+    template <typename SRC, typename DST>
+    inline DST Encode(SRC value) 
+    {
+        union { SRC src; DST dst; };
+        src = value;
+        return dst;
+    }
+    
+    class RenewableCodedStream 
+    {
+    public:
+        RenewableCodedStream(io::ZeroCopyInputStream& input) 
+            : m_input(input)
+        {
+            Renew();
+        }
+
+        template <typename T>
+        inline bool Read(T* value) 
+        {
+            auto size = sizeof(T);
+
+            if (m_codedInputPtr->CurrentPosition() > INT_MAX - size)
+                Renew();
+            
+            if (size == sizeof(uint32)) {
+                uint32 tmp;
+                if (!m_codedInputPtr->ReadLittleEndian32(&tmp))
+                    return false;
+                *value = Encode<uint32, T>(tmp);
+                return true;
+            }
+
+            if (size == sizeof(uint64)) {
+                uint64 tmp;
+                if (!m_codedInputPtr->ReadLittleEndian64(&tmp))
+                    return false;
+                *value = Encode<uint64, T>(tmp);
+                return true;
+            }
+
+            return false;
+        }
+
+    private:
+        void Renew()
+        {
+            delete m_codedInputPtr.release();
+            m_codedInputPtr = make_unique<io::CodedInputStream>(&m_input);
+            m_codedInputPtr->SetTotalBytesLimit(INT_MAX, INT_MAX);
+        }
+
+        io::ZeroCopyInputStream& m_input;
+        std::unique_ptr<io::CodedInputStream> m_codedInputPtr;
+    };
+
+
     class Serializer
     {
         friend std::ostream& operator<<(std::ostream&, const Dictionary&);
-        friend std::istream& operator>>(std::istream&, Dictionary&);
         friend std::ostream& operator<<(std::ostream&, const DictionaryValue&);
+
+        friend std::istream& operator>>(std::istream&, Dictionary&);
         friend std::istream& operator>>(std::istream&, DictionaryValue&);
 
+        friend class Dictionary;
+        friend class DictionaryValue;
+
+        Serializer(const Dictionary& dict);
+        Serializer(const DictionaryValue& dict);
+
+        Serializer() = default;
+
     private:
-        static proto::DictionaryValue* CreateProto(const DictionaryValue& src);
-        static proto::Dictionary* CreateProto(const Dictionary& src);
-        static proto::Vector* CreateProto(const std::vector<DictionaryValue>& src);
-        static proto::NDArrayView* CreateProto(const NDArrayView& src);
-        static proto::Axis* CreateProto(const Axis& src);
-        static proto::NDShape* CreateProto(const NDShape& src);
+        proto::DictionaryValue* CreateProto(const DictionaryValue& src, Arena* arena = nullptr);
+        proto::Dictionary* CreateProto(const Dictionary& src, Arena* arena = nullptr);
+        proto::Vector* CreateProto(const std::vector<DictionaryValue>& src, Arena* arena = nullptr);
+        proto::NDArrayView* CreateProto(const NDArrayView& src, Arena* arena = nullptr);
+        proto::Axis* CreateProto(const Axis& src, Arena* arena = nullptr);
+        proto::NDShape* CreateProto(const NDShape& src, Arena* arena = nullptr);
 
-        static Dictionary* CreateFromProto(const proto::Dictionary& src);
-        static std::vector<DictionaryValue>* CreateFromProto(const proto::Vector& src);
-        static NDArrayView* CreateFromProto(const proto::NDArrayView& src);
-        static Axis* CreateFromProto(const proto::Axis& src);
-        static NDShape* CreateFromProto(const proto::NDShape& src);
+        void Copy(const DictionaryValue& src, proto::DictionaryValue& dst, Arena* arena = nullptr);
+        
+        void CopyNDArrayViewDataToProtos();
+        void WriteNDArrayViewData(io::CodedOutputStream& output);
 
-        static void Copy(const DictionaryValue& src, proto::DictionaryValue& dst);
-        static void Copy(const proto::DictionaryValue& src, DictionaryValue& dst);
+        std::ostream& Write(std::ostream& stream);
+        void Write(const std::wstring& filename);
+        void Write(io::ZeroCopyOutputStream& stream);
 
-        static std::string ToString(const std::wstring& wstring)
+
+        bool Read(std::istream& stream, Dictionary& dict);
+        bool Read(std::istream& stream, DictionaryValue& value);
+
+        bool Read(const std::wstring& filename, Dictionary& dict);
+        bool Read(const std::wstring& filename, DictionaryValue& value);
+
+        bool Read(std::wstring filename, const std::function<bool(io::ZeroCopyInputStream& input)>& callback);
+        bool Read(std::istream& stream, const std::function<bool(io::ZeroCopyInputStream& input)>& callback);
+
+        bool ReadNDArrayViewData(io::ZeroCopyInputStream& input);
+
+        size_t GetTotalByteSize() 
         {
-#ifdef _MSC_VER
-            std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t> converter;
-            return converter.to_bytes(wstring);
-#else
-            const auto length = wstring.length() * sizeof(std::wstring::value_type) + 1;
-            char buf[length];
-            const auto res = std::wcstombs(buf, wstring.c_str(), sizeof(buf));
-            return (res >= 0) ? buf : "";
-#endif
+            return m_byteSize + m_proto->ByteSizeLong();
         }
 
-        static std::wstring ToWString(const std::string& string)
+        bool FitsIntoProtobuf()
         {
-#ifdef _MSC_VER
-            std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t> converter;
-            return converter.from_bytes(string);
-#else
-            const auto length = string.length() + 1;
-            wchar_t buf[length];
-            const auto res = std::mbstowcs(buf, string.c_str(),  sizeof(buf));
-            return (res >= 0) ? buf : L"";
-#endif
+            return GetTotalByteSize() < static_cast<size_t>(INT_MAX);
         }
+
+        Dictionary* CreateFromProto(const proto::Dictionary& src);
+        std::vector<DictionaryValue>* CreateFromProto(const proto::Vector& src);
+        NDArrayView* CreateFromProto(const proto::NDArrayView& src);
+        Axis* CreateFromProto(const proto::Axis& src);
+        NDShape* CreateFromProto(const proto::NDShape& src);
+
+        void Copy(const proto::Dictionary& src, Dictionary& dst);
+        void Copy(const proto::DictionaryValue& src, DictionaryValue& dst);
 
         static proto::NDArrayView::DataType ToProtoType(DataType type)
         {
@@ -130,23 +231,46 @@ namespace CNTK
             return DictionaryValue::Type(type);
         }
 
-
-
         template <typename T>
-        static void CopyData(const NDArrayView& src, ::google::protobuf::RepeatedField<T>* dst)
+        static void CopyData(const NDArrayView& src, RepeatedField<T>* dst)
         {
             auto size = src.Shape().TotalSize();
-            if (size > std::numeric_limits<int>::max())
-            {
-                InvalidArgument("NDArrayView is too big to fit in a protobuf.");
-            }
             dst->Resize((int)size, T());
             const T* buffer = src.DataBuffer<T>();
             memcpy(dst->mutable_data(), buffer, (int)size * sizeof(T));
         }
 
         template <typename T>
-        static void CopyData(const ::google::protobuf::RepeatedField<T>& src, NDArrayView* dst)
+        static void WriteData(const NDArrayView& src, io::CodedOutputStream& output)
+        {
+            auto size = src.Shape().TotalSize();
+            const T* buffer = src.DataBuffer<T>();
+            auto tSize = sizeof(T);
+            for (auto i = 0; i < size; i++) 
+            {
+                auto value = buffer[i];
+                if (tSize <= sizeof(uint32))
+                    output.WriteLittleEndian32(Encode<T, uint32>(value));
+                else 
+                    output.WriteLittleEndian64(Encode<T, uint64>(value));
+            }
+        }
+
+        template <typename T>
+        static bool ReadData(RenewableCodedStream& input, NDArrayView& dst)
+        {
+            auto size = dst.Shape().TotalSize();
+            T* buffer = dst.WritableDataBuffer<T>();
+            for (auto i = 0; i < size; i++)
+            {
+                if (!input.Read<T>(buffer+i))
+                    return false;
+            }
+            return true;
+        }
+
+        template <typename T>
+        static void CopyData(const RepeatedField<T>& src, NDArrayView* dst)
         {
             auto size = src.size();
             assert(size == dst->Shape().TotalSize());;
@@ -154,12 +278,86 @@ namespace CNTK
             memcpy(buffer, src.data(), size * sizeof(T));
         }
 
+        
+
+        UsingUTF8 m_locale;
+        Arena m_arena;
+        Message* m_proto;
+        std::vector<std::pair<NDArrayView*, proto::NDArrayView*>> m_arrayViews;
+        size_t m_byteSize {0};
     };
 
-    // TODO: use arenas for message allocations
-    /*static*/ proto::NDShape* Serializer::CreateProto(const NDShape& src)
+
+    Serializer::Serializer(const Dictionary& dict) 
     {
-        proto::NDShape* dst = new proto::NDShape();
+        m_proto = CreateProto(dict, &m_arena);
+    }
+
+    Serializer::Serializer(const DictionaryValue& value)
+    {
+        m_proto = CreateProto(value, &m_arena);
+    }
+  
+    void Serializer::CopyNDArrayViewDataToProtos()
+    {
+        for (auto& pair : m_arrayViews) 
+        {
+            const auto& src = *(pair.first);
+            auto dst = pair.second;
+            if (src.GetDataType() == DataType::Float)
+            {
+                CopyData<float>(src, dst->mutable_float_values()->mutable_value());
+            }
+            else if (src.GetDataType() == DataType::Double)
+            {
+                CopyData<double>(src, dst->mutable_double_values()->mutable_value());
+            }
+        }
+    }
+
+    void Serializer::WriteNDArrayViewData(io::CodedOutputStream& output) 
+    {
+        for (auto& pair : m_arrayViews)
+        {
+            const auto& src = *(pair.first);
+            if (src.GetDataType() == DataType::Float)
+            {
+                WriteData<float>(src, output);
+            }
+            else if (src.GetDataType() == DataType::Double)
+            {
+                WriteData<double>(src, output);
+            }
+        }
+    }
+
+    bool Serializer::ReadNDArrayViewData(io::ZeroCopyInputStream& input)
+    {
+        if (m_arrayViews.size() == 0)
+            return true;
+
+        RenewableCodedStream wrapper(input);
+        for (auto& pair : m_arrayViews)
+        {
+            auto& dst = *(pair.first);
+            if (dst.GetDataType() == DataType::Float)
+            {
+                if (!ReadData<float>(wrapper, dst))
+                    return false;
+            }
+            else if (dst.GetDataType() == DataType::Double)
+            {
+                if (!ReadData<double>(wrapper, dst))
+                    return false;                
+            }
+        }
+        return true;
+    }
+
+    proto::NDShape* Serializer::CreateProto(const NDShape& src, Arena* arena)
+    {
+        proto::NDShape* dst = (arena != nullptr) ? 
+            Arena::CreateMessage<proto::NDShape>(arena) : new proto::NDShape();
         auto size = src.Rank();
         dst->mutable_shape_dim()->Reserve((int)size);
         for (auto i = 0; i < size; i++)
@@ -169,7 +367,7 @@ namespace CNTK
         return dst;
     }
 
-    /*static*/ NDShape* Serializer::CreateFromProto(const proto::NDShape& src)
+    NDShape* Serializer::CreateFromProto(const proto::NDShape& src)
     {
         auto size = src.shape_dim_size();
         NDShape* dst = new NDShape(size);
@@ -180,16 +378,17 @@ namespace CNTK
         return dst;
     }
 
-    /*static*/ proto::Axis* Serializer::CreateProto(const Axis& src)
+    proto::Axis* Serializer::CreateProto(const Axis& src, Arena* arena)
     {
-        proto::Axis* dst = new proto::Axis();
+        proto::Axis* dst = (arena != nullptr) ? 
+            Arena::CreateMessage<proto::Axis>(arena) : new proto::Axis();
         dst->set_static_axis_idx(src.StaticAxisIndex(false));
         dst->set_name(ToString(src.Name()));
         dst->set_is_ordered_dynamic_axis(src.IsOrdered());
         return dst;
     }
 
-    /*static*/ Axis* Serializer::CreateFromProto(const proto::Axis& src)
+    Axis* Serializer::CreateFromProto(const proto::Axis& src)
     {
         if (!Axis(src.static_axis_idx()).IsDynamicAxis())
         {
@@ -201,24 +400,26 @@ namespace CNTK
         }
     }
 
-    /*static*/ proto::NDArrayView* Serializer::CreateProto(const NDArrayView& src)
+    proto::NDArrayView* Serializer::CreateProto(const NDArrayView& src, Arena* arena)
     {
-        proto::NDArrayView* dst = new proto::NDArrayView();
+        proto::NDArrayView* dst = (arena != nullptr) ? 
+            Arena::CreateMessage<proto::NDArrayView>(arena) : new proto::NDArrayView();
         dst->set_data_type(ToProtoType(src.GetDataType()));
-        dst->set_allocated_shape(CreateProto(src.Shape()));
+        dst->set_allocated_shape(CreateProto(src.Shape(), arena));
         dst->set_storage_format(ToProtoType(src.GetStorageFormat()));
-        if (src.GetDataType() == DataType::Float)
-        {
-            CopyData<float>(src, dst->mutable_float_values()->mutable_value());
-        }
-        else if (src.GetDataType() == DataType::Double)
-        {
-            CopyData<double>(src, dst->mutable_double_values()->mutable_value());
-        }
+
+        m_arrayViews.push_back({const_cast<NDArrayView*>(&src), dst });
+        
+        auto numElements = src.Shape().TotalSize();
+        auto dataSize = DataTypeSize(src.GetDataType());
+        if (numElements > SIZE_MAX / dataSize) 
+            RuntimeError("Bytes size of NDArrayView exceeds %zu.", SIZE_MAX);
+        m_byteSize += numElements * dataSize;
+
         return dst;
     }
 
-    /*static*/ NDArrayView* Serializer::CreateFromProto(const proto::NDArrayView& src)
+    NDArrayView* Serializer::CreateFromProto(const proto::NDArrayView& src)
     {
         if (!proto::NDArrayView::DataType_IsValid(src.data_type()) ||
             !proto::NDArrayView::StorageFormat_IsValid(src.storage_format()))
@@ -233,27 +434,34 @@ namespace CNTK
 
         if (dataType == DataType::Float)
         {
-            CopyData<float>(src.float_values().value(), dst);
+            if (src.float_values().value().size() == shape->TotalSize())
+                CopyData<float>(src.float_values().value(), dst);
+            else 
+                m_arrayViews.push_back({ dst, nullptr });
         }
         else if (dataType == DataType::Double)
         {
-            CopyData<double>(src.double_values().value(), dst);
+            if (src.double_values().value().size() == shape->TotalSize())
+                CopyData<double>(src.double_values().value(), dst);
+            else
+                m_arrayViews.push_back({ dst, nullptr });
         }
         return dst;
     }
 
-    /*static*/ proto::Vector* Serializer::CreateProto(const std::vector<DictionaryValue>& src)
+    proto::Vector* Serializer::CreateProto(const std::vector<DictionaryValue>& src, Arena* arena)
     {
-        proto::Vector* dst = new proto::Vector();
+        proto::Vector* dst = (arena != nullptr) ? 
+            Arena::CreateMessage<proto::Vector>(arena) : new proto::Vector();
         dst->mutable_value()->Reserve((int)src.size());
         for (const auto& value : src)
         {
-            dst->mutable_value()->AddAllocated(CreateProto(value));
+            dst->mutable_value()->AddAllocated(CreateProto(value, arena));
         }
         return dst;
     }
 
-    /*static*/ std::vector<DictionaryValue>* Serializer::CreateFromProto(const proto::Vector& src)
+    std::vector<DictionaryValue>* Serializer::CreateFromProto(const proto::Vector& src)
     {
         std::vector<DictionaryValue>* dst = new std::vector<DictionaryValue>(src.value_size());
         for (auto i = 0; i < src.value_size(); ++i)
@@ -263,18 +471,19 @@ namespace CNTK
         return dst;
     }
 
-    /*static*/ proto::Dictionary* Serializer::CreateProto(const Dictionary& src)
+    proto::Dictionary* Serializer::CreateProto(const Dictionary& src, Arena* arena)
     {
-        proto::Dictionary* dst = new proto::Dictionary();
+        proto::Dictionary* dst = (arena != nullptr) ? 
+            Arena::CreateMessage<proto::Dictionary>(arena) : new proto::Dictionary();
         dst->set_version(src.s_version);
         for (const auto& kv : src)
         {
-            Copy(kv.second, dst->mutable_data()->operator[](ToString(kv.first)));
+            Copy(kv.second, dst->mutable_data()->operator[](ToString(kv.first)), arena);
         }
         return dst;
     }
 
-    /*static*/ Dictionary* Serializer::CreateFromProto(const proto::Dictionary& src)
+    Dictionary* Serializer::CreateFromProto(const proto::Dictionary& src)
     {
         Dictionary* dst = new Dictionary();
         for (const auto& kv : src.data())
@@ -284,18 +493,20 @@ namespace CNTK
         return dst;
     }
 
-    /*static*/ proto::DictionaryValue* Serializer::CreateProto(const DictionaryValue& src)
+    proto::DictionaryValue* Serializer::CreateProto(const DictionaryValue& src, Arena* arena)
     {
-        proto::DictionaryValue* dst = new proto::DictionaryValue();
+        proto::DictionaryValue* dst = (arena != nullptr) ? 
+            Arena::CreateMessage<proto::DictionaryValue>(arena) : new proto::DictionaryValue();
         dst->set_version(src.s_version);
-        Copy(src, *dst);
+        Copy(src, *dst, arena);
         return dst;
     }
 
-    /*static*/ void Serializer::Copy(const DictionaryValue& src, proto::DictionaryValue& dst)
+    void Serializer::Copy(const DictionaryValue& src, proto::DictionaryValue& dst, Arena* arena)
     {
         auto valueType = src.ValueType();
         dst.set_value_type(ToProtoType(valueType));
+        dst.set_version(src.s_version);
         switch (valueType)
         {
         case DictionaryValue::Type::None:
@@ -319,26 +530,35 @@ namespace CNTK
             dst.set_string_value(ToString(src.Value<std::wstring>()));
             break;
         case DictionaryValue::Type::NDShape:
-            dst.set_allocated_nd_shape_value(CreateProto(src.Value<NDShape>()));
+            dst.set_allocated_nd_shape_value(CreateProto(src.Value<NDShape>(), arena));
             break;
         case DictionaryValue::Type::Axis:
-            dst.set_allocated_axis_value(CreateProto(src.Value<Axis>()));
+            dst.set_allocated_axis_value(CreateProto(src.Value<Axis>(), arena));
             break;
         case DictionaryValue::Type::Vector:
-            dst.set_allocated_vector_value(CreateProto(src.Value<std::vector<DictionaryValue>>()));
+            dst.set_allocated_vector_value(CreateProto(src.Value<std::vector<DictionaryValue>>(), arena));
             break;
         case DictionaryValue::Type::Dictionary:
-            dst.set_allocated_dictionary_value(CreateProto(src.Value<Dictionary>()));
+            dst.set_allocated_dictionary_value(CreateProto(src.Value<Dictionary>(), arena));
             break;
         case DictionaryValue::Type::NDArrayView:
-            dst.set_allocated_nd_array_view_value(CreateProto(src.Value<NDArrayView>()));
+            dst.set_allocated_nd_array_view_value(CreateProto(src.Value<NDArrayView>(), arena));
             break;
         default:
             NOT_IMPLEMENTED
         }
     }
 
-    /*static*/ void Serializer::Copy(const proto::DictionaryValue& src, DictionaryValue& dst)
+    void Serializer::Copy(const proto::Dictionary& src, Dictionary& dst)
+    {
+        dst.m_dictionaryData->reserve(src.data_size());
+        for (const auto& kv : src.data())
+        {
+            Serializer::Copy(kv.second, dst[ToWString(kv.first)]);
+        }
+    }
+
+    void Serializer::Copy(const proto::DictionaryValue& src, DictionaryValue& dst)
     {
         auto valueType = src.value_type();
 
@@ -388,73 +608,195 @@ namespace CNTK
         }
     }
 
-    static void SetUTF8Locale()
-    {   
-#ifndef _MSC_VER
-        if (std::setlocale(LC_ALL, "C.UTF-8") == nullptr) 
+    void Serializer::Write(io::ZeroCopyOutputStream& stream) {
+        io::CodedOutputStream output(&stream);
+
+        // Protobufs have a hard limit on the maximum message size(INT_MAX = 2GBs). 
+        // Check if we fit into a single protobuf message.
+        if (FitsIntoProtobuf())
         {
-            std::setlocale(LC_ALL, "en_US.UTF-8");
+            CopyNDArrayViewDataToProtos();
+            m_proto->SerializeToCodedStream(&output);
         }
-#endif
+        else
+        {
+            // If we don't, pull the metadata apart from the actual payload (NDArrayView content)
+            // and store the payload separately, outside of the protobuf.
+            // Prefix the metadata protobuf with a magic number and its bytes size.
+            output.WriteLittleEndian32(MAGIC_NUMBER);
+            output.WriteLittleEndian32(m_proto->ByteSize());
+            m_proto->SerializeToCodedStream(&output);
+            WriteNDArrayViewData(output);
+        }
     }
 
-    static void UnsetUTF8Locale()
-    {   
-#ifndef _MSC_VER
-        std::setlocale(LC_ALL, "");
-#endif
-    }
-   
-
-    std::istream& operator>>(std::istream& stream, ::google::protobuf::Message& msg)
+    std::ostream& Serializer::Write(std::ostream& stream)
     {
-        google::protobuf::io::IstreamInputStream isistream(&stream);
-        google::protobuf::io::CodedInputStream input(&isistream);
-        input.SetTotalBytesLimit(INT_MAX, INT_MAX);
-        msg.ParseFromCodedStream(&input);
+        io::OstreamOutputStream output(&stream);
+        Write(output);
         return stream;
     }
 
-    // TODO: Add read/write to/from file and use FileInput/OutputStream
+    void Serializer::Write(const std::wstring& filename)
+    {
+        auto fd = GetFileDescriptor(filename, false);
+        {
+            io::FileOutputStream output(fd);
+            Write(output);
+        }
+#ifdef _MSC_VER
+        _close(fd);
+#else
+        close(fd);
+#endif
+    }
+
+    bool ParseMessage(io::ZeroCopyInputStream& input, Message& msg)
+    {
+        uint32 prefix = 0, limit = INT_MAX;;
+        const void* temp;
+        int size;
+        bool success;
+        do {
+            success = input.Next(&temp, &size);
+        } while (success && size == 0);
+    
+        if (!success)
+            return false;
+        
+        if (size >= (sizeof(prefix) + sizeof(limit))) 
+        {
+            io::CodedInputStream::ReadLittleEndian32FromArray(reinterpret_cast<const uint8*>(temp), &prefix);
+        }
+
+        // the message is only prefixed with a magic number + message length,
+        // if its size exceeds 2GBs.
+        if (prefix == MAGIC_NUMBER) 
+        {
+            io::CodedInputStream::ReadLittleEndian32FromArray(
+                reinterpret_cast<const uint8*>(temp) + sizeof(prefix), &limit);
+
+            input.BackUp(size - sizeof(prefix) - sizeof(limit));
+        }
+        else 
+            input.BackUp(size);
+
+        io::CodedInputStream codedInput(&input);
+        codedInput.SetTotalBytesLimit(limit, limit);
+
+        return msg.ParseFromCodedStream(&codedInput) && codedInput.ConsumedEntireMessage();
+    }
+
+    bool Serializer::Read(std::istream& stream, Dictionary& dict)
+    {
+        m_proto = Arena::CreateMessage<proto::Dictionary>(&m_arena);
+        return Read(stream, [this, &dict](io::ZeroCopyInputStream& input) {
+            Copy(*dynamic_cast<proto::Dictionary*>(m_proto), dict);
+            return ReadNDArrayViewData(input);
+        });
+    }
+
+    bool Serializer::Read(std::istream& stream, DictionaryValue& value)
+    {
+        m_proto = Arena::CreateMessage<proto::DictionaryValue>(&m_arena);
+        return Read(stream, [this, &value](io::ZeroCopyInputStream& input) {
+            Copy(*dynamic_cast<proto::DictionaryValue*>(m_proto), value);
+            return ReadNDArrayViewData(input);
+        });
+    }
+
+    bool Serializer::Read(const std::wstring& filename, Dictionary& dict)
+    {
+        m_proto = Arena::CreateMessage<proto::Dictionary>(&m_arena);
+        return Read(filename, [this, &dict](io::ZeroCopyInputStream& input) {
+            Copy(*dynamic_cast<proto::Dictionary*>(m_proto), dict);
+            return ReadNDArrayViewData(input);
+        });
+    }
+
+    bool Serializer::Read(const std::wstring& filename, DictionaryValue& value)
+    {
+        m_proto = Arena::CreateMessage<proto::DictionaryValue>(&m_arena);
+        return Read(filename, [this, &value](io::ZeroCopyInputStream& input) {
+            Copy(*dynamic_cast<proto::DictionaryValue*>(m_proto), value);
+            return ReadNDArrayViewData(input);
+        });
+    }
+
+    bool Serializer::Read(std::wstring filename, const std::function<bool(io::ZeroCopyInputStream& input)>& callback)
+    {
+        bool result;
+        auto fd = GetFileDescriptor(filename, true);
+        {
+            io::FileInputStream input(fd, BLOCK_SIZE);
+            result = ParseMessage(input, *m_proto);
+            result = result && callback(input);
+        }
+#ifdef _MSC_VER
+        _close(fd);
+#else
+        close(fd);
+#endif
+        return result;
+    }
+
+    bool Serializer::Read(std::istream& stream, const std::function<bool(io::ZeroCopyInputStream& input)>& callback)
+    {
+        io::IstreamInputStream input(&stream, BLOCK_SIZE);
+        if (ParseMessage(input, *m_proto))
+        {
+            return callback(input);
+        }
+        return false;
+    }
+
     std::ostream& operator<<(std::ostream& stream, const Dictionary& dictionary)
     {
-        SetUTF8Locale();
-        std::unique_ptr<proto::Dictionary> proto(Serializer::CreateProto(dictionary));
-        proto->SerializeToOstream(&stream);
-        UnsetUTF8Locale();
-        return stream;
-    }
-
-    std::istream& operator>>(std::istream& stream, Dictionary& dictionary)
-    {
-        SetUTF8Locale();
-        proto::Dictionary proto;
-        stream >> proto;
-        dictionary.m_dictionaryData->reserve(proto.data_size());
-        for (const auto& kv : proto.data())
-        {
-            Serializer::Copy(kv.second, dictionary[Serializer::ToWString(kv.first)]);
-        }
-        UnsetUTF8Locale();
-        return stream;
+        return Serializer(dictionary).Write(stream);
     }
 
     std::ostream& operator<<(std::ostream& stream, const DictionaryValue& value)
     {
-        SetUTF8Locale();
-        std::unique_ptr<proto::DictionaryValue> proto(Serializer::CreateProto(value));
-        proto->SerializeToOstream(&stream);
-        UnsetUTF8Locale();
+        return Serializer(value).Write(stream);
+    }
+
+    void Dictionary::Save(const std::wstring& filename)
+    {
+        Serializer(*this).Write(filename);
+    }
+
+    void DictionaryValue::Save(const std::wstring& filename)
+    {
+        Serializer(*this).Write(filename);
+    }
+
+    std::istream& operator>>(std::istream& stream, Dictionary& dictionary)
+    {
+        if (!Serializer(dictionary).Read(stream, dictionary)) 
+            RuntimeError("Failed to parse Dictionary from the input stream.");
         return stream;
     }
 
     std::istream& operator>>(std::istream& stream, DictionaryValue& value)
     {
-        SetUTF8Locale();
-        proto::DictionaryValue proto;
-        stream >> proto;
-        Serializer::Copy(proto, value);
-        UnsetUTF8Locale();
+        if (!Serializer(value).Read(stream, value)) 
+            RuntimeError("Failed to parse DictionaryValue from the input stream.");
         return stream;
+    }
+
+    /*static*/ Dictionary Dictionary::Load(const std::wstring& filename)
+    {
+        Dictionary dictionary;
+        if (!Serializer().Read(filename, dictionary))
+            RuntimeError("Failed to parse Dictionary from file (%ls).", filename.c_str());
+        return dictionary;
+    }
+
+    /*static*/ DictionaryValue DictionaryValue::Load(const std::wstring& filename)
+    {
+        DictionaryValue dictionaryValue;
+        if (!Serializer().Read(filename, dictionaryValue))
+            RuntimeError("Failed to parse DictionaryValue from file (%ls).", filename.c_str());
+        return dictionaryValue;
     }
 }

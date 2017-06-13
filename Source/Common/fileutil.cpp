@@ -25,6 +25,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <glob.h>
+#include <dirent.h>
+#include <sys/sendfile.h>
 #endif
 #include <stdio.h>
 #include <string.h>
@@ -104,7 +106,11 @@ const wchar_t* GetScanFormatString(unsigned int)
 {
     return L" %u";
 }
-//template <>    const wchar_t* GetScanFormatString(unsigned long) {return L" %lu";}
+template <>
+const wchar_t* GetScanFormatString(unsigned long) 
+{
+    return L" %lu";
+}
 template <>
 const wchar_t* GetScanFormatString(float)
 {
@@ -116,7 +122,7 @@ const wchar_t* GetScanFormatString(double)
     return L" %lg";
 }
 template <>
-const wchar_t* GetScanFormatString(size_t)
+const wchar_t* GetScanFormatString(unsigned long long)
 {
     return L" %llu";
 }
@@ -161,7 +167,13 @@ const wchar_t* GetFormatString(unsigned int)
 {
     return L" %u";
 }
-//template <>    const wchar_t* GetFormatString(unsigned long) {return L" %lu";}
+
+template <>
+const wchar_t* GetFormatString(unsigned long)
+{
+    return L" %lu";
+}
+
 template <>
 const wchar_t* GetFormatString(float)
 {
@@ -173,7 +185,7 @@ const wchar_t* GetFormatString(double)
     return L" %.17g";
 }
 template <>
-const wchar_t* GetFormatString(size_t)
+const wchar_t* GetFormatString(unsigned long long)
 {
     return L" %llu";
 }
@@ -547,7 +559,7 @@ uint64_t fgetpos(FILE* f)
 void fsetpos(FILE* f, uint64_t reqpos)
 {
 #ifdef _MSC_VER // standard does not allow to cast between fpos_t and integer numbers, and indeed it does not work on Linux (but on Windows and GCC)
-#ifdef _MSC_VER // special hack for VS CRT
+#if (_MSC_VER <= 1800) // Note: this does not trigger if loaded in vs2013 mode in vs2015!
     // Visual Studio's ::fsetpos() flushes the read buffer. This conflicts with a situation where
     // we generally read linearly but skip a few bytes or KB occasionally, as is
     // the case in speech recognition tools. This requires a number of optimizations.
@@ -570,6 +582,34 @@ void fsetpos(FILE* f, uint64_t reqpos)
         if (curpos != fgetpos(f) || curpos + f->_cnt != cureob)
             break; // oops
     }
+#else
+    // special hack for VS CRT (for VS2015)
+    // Visual Studio's ::fsetpos() flushes the read buffer. This conflicts with a situation where
+    // we generally read linearly but skip a few bytes or KB occasionally, as is
+    // the case in speech recognition tools. This requires a number of optimizations.
+#define MAX_FREAD_SKIP 65536
+
+    // forward seeks up to 64KiB are simulated
+    // through a dummy read instead of fsetpos to
+    // the new position.
+    uint64_t curpos = fgetpos(f);
+    size_t n = min((size_t)reqpos - (size_t)curpos, (size_t)MAX_FREAD_SKIP);
+
+    // TODO: if we only skip a limited number of bytes, fread() them
+    //       instead of fsetpos() to the new position since the vs2015
+    //       libraries might drop the internal buffer and thus have to re-read
+    //       from the new position, somthing that costs performance.
+    if (n < MAX_FREAD_SKIP)
+    {
+        // in case we  stay in the internal buffer, no fileio is needed for this operation.
+        char buf[MAX_FREAD_SKIP];
+        fread(buf, sizeof(buf[0]), n, f); // (this may fail, but really shouldn't)
+
+        // if we made it then do not call fsetpos()
+        if (reqpos == fgetpos(f))
+            return;
+    }
+#undef MAX_FREAD_SKIP
 #endif // end special hack for VS CRT
 
     // actually perform the seek
@@ -639,6 +679,34 @@ void renameOrDie(const std::wstring& from, const std::wstring& to)
 #else
     renameOrDie(wtocharpath(from.c_str()).c_str(), wtocharpath(to.c_str()).c_str());
 #endif
+}
+
+// ----------------------------------------------------------------------------
+// copyOrDie(): copy file with error handling.
+// ----------------------------------------------------------------------------
+
+void copyOrDie(const string& from, const string& to)
+{
+    // Call wide string implementation.
+    copyOrDie(s2ws(from), s2ws(to));
+}
+
+void copyOrDie(const wstring& from, const wstring& to)
+{
+    const wstring tempTo = to + L".tmp";
+#ifdef _WIN32
+    const BOOL succeeded = CopyFile(from.c_str(), tempTo.c_str(), FALSE);
+    if (!succeeded)
+        RuntimeError("error copying file '%ls' to '%ls': %d", from.c_str(), tempTo.c_str(), GetLastError());
+#else
+    FILE* fromFile = fopenOrDie(from, L"rb");
+    FILE* tempToFile = fopenOrDie(tempTo, L"wb");
+    const size_t fromFileSize = filesize(fromFile);
+    sendfile(fileno(tempToFile), fileno(fromFile), 0, fromFileSize);
+    fcloseOrDie(fromFile);
+    fcloseOrDie(tempToFile);
+#endif
+    renameOrDie(tempTo, to);
 }
 
 // ----------------------------------------------------------------------------
@@ -1914,6 +1982,54 @@ void msra::files::make_intermediate_dirs(const wstring& filepath)
             subpath += L"/";
         subpath += p;
     }
+}
+
+std::vector<std::wstring> msra::files::get_all_files_from_directory(const std::wstring& directory)
+{
+    std::vector<std::wstring> result;
+#ifdef _WIN32
+    WIN32_FIND_DATA ffd = {};
+    HANDLE hFind = FindFirstFile((directory + L"/*").c_str(), &ffd);
+    if (INVALID_HANDLE_VALUE == hFind)
+        RuntimeError("Cannot get information about directory '%ls'.", directory.c_str());
+
+    do
+    {
+        if (!(ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            result.push_back(ffd.cFileName);
+        }
+    } while (FindNextFile(hFind, &ffd) != 0);
+
+    auto dwError = GetLastError();
+    FindClose(hFind);
+
+    if (dwError != ERROR_NO_MORE_FILES)
+        RuntimeError("Error iterating directory '%ls'", directory.c_str());
+#else
+    std::string d = msra::strfun::utf8(directory);
+    auto dirp = opendir(d.c_str());
+    dirent *dp = nullptr;
+    struct stat st = {};
+    while ((dp = readdir(dirp)) != NULL)
+    {
+        const std::string fileName = dp->d_name;
+        const std::string fullFileName = d + "/" + fileName;
+
+        if (fileName == "." || fileName == "..")
+            continue;
+
+        if (stat(fullFileName.c_str(), &st) == -1)
+            continue;
+
+        if ((st.st_mode & S_IFDIR) != 0)
+            continue;
+
+        result.push_back(msra::strfun::utf16(fileName));
+    }
+    closedir(dirp);
+#endif
+    return result;
 }
 
 // ----------------------------------------------------------------------------
